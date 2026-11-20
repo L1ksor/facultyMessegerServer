@@ -1,0 +1,5 @@
+.env
+garage.toml
+src/**/bin/
+src/**/obj/
+src/**/uploads/

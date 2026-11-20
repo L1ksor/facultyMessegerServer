@@ -1,0 +1,36 @@
+name: faculty-messenger
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: faculty-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: faculty_messenger
+      POSTGRES_USER: faculty
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faculty -d faculty_messenger"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  garage:
+    image: dxflrs/garage:v1.0.1
+    container_name: faculty-garage
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3900:3900"
+      - "127.0.0.1:3903:3903"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+
+volumes:
+  pgdata:
+  garage_meta:
+  garage_data:

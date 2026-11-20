@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Faculty Messenger — Debug UI &amp; Admin Panel</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@8.0.7/dist/browser/signalr.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Верхняя панель отладки и переключения аккаунтов -->
+    <header class="topbar">
+      <div class="topbar-brand">
+        <span class="logo-dot"></span>
+        <div>
+          <div class="brand-title">Faculty Messenger</div>
+          <div class="brand-sub">3-Level RBAC · Chat Roles · Garage S3</div>
+        </div>
+      </div>
+
+      <div class="topbar-api">
+        <label for="apiBaseInput">API URL:</label>
+        <input id="apiBaseInput" type="text" value="http://localhost:5132" />
+        <button id="saveApiBaseBtn" class="btn btn-sm btn-secondary">Применить</button>
+        <span id="signalrStatus" class="status-pill status-off">SignalR: отключён</span>
+      </div>
+
+      <div class="topbar-sessions">
+        <span class="sessions-label">Аккаунты:</span>
+        <div id="sessionSwitcher" class="session-chips"></div>
+        <button id="openLoginModalBtn" class="btn btn-sm btn-primary">+ Войти</button>
+      </div>
+    </header>
+
+    <!-- Баннер принудительной смены временного пароля -->
+    <section id="mustChangeBanner" class="banner banner-warning hidden">
+      <div>
+        <strong>Требуется смена временного пароля.</strong>
+        Пока <code>MustChangePassword == true</code>, остальные запросы блокируются сервером (403).
+      </div>
+      <div class="banner-form">
+        <input id="mcpCurrentPass" type="password" placeholder="Текущий (временный) пароль" />
+        <input id="mcpNewPass" type="password" placeholder="Новый пароль (мин. 8 симв.)" />
+        <button id="mcpSubmitBtn" class="btn btn-sm btn-primary">Сменить пароль</button>
+      </div>
+    </section>
+
+    <!-- Навигация по вкладкам -->
+    <nav class="main-nav">
+      <button class="nav-tab active" data-tab="messenger">💬 Мессенджер</button>
+      <button class="nav-tab" data-tab="profile">👤 Профиль, Группы и Уведомления</button>
+      <button class="nav-tab" data-tab="admin">🛠️ Админ-панель</button>
+      <button class="nav-tab" data-tab="logs">📡 Журнал API / SignalR <span id="logCounter" class="badge">0</span></button>
+      <div id="currentUserBadge" class="current-user-pill">Не авторизован</div>
+    </nav>
+
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- ВКЛАДКА 1: МЕССЕНДЖЕР -->
+    <main id="tab-messenger" class="tab-panel active">
+      <div class="messenger-grid">
+        <!-- Левая колонка: список чатов -->
+        <aside class="chat-sidebar card">
+          <div class="sidebar-header">
+            <h3>Чаты</h3>
+            <label class="checkbox-inline">
+              <input id="includeArchivedChk" type="checkbox" />
+              Архив
+            </label>
+          </div>
+          <div class="sidebar-actions">
+            <button id="refreshChatsBtn" class="btn btn-sm btn-secondary">Обновить</button>
+            <button id="openCustomChatModalBtn" class="btn btn-sm btn-primary">+ Беседа</button>
+            <button id="openSubjectModalBtn" class="btn btn-sm btn-primary hidden" title="Доступно Employee / Admin">+ Предмет</button>
+            <button id="openDirectModalBtn" class="btn btn-sm btn-secondary">+ Личный</button>
+          </div>
+          <div id="chatList" class="chat-list"></div>
+        </aside>
+
+        <!-- Центр: активный чат -->
+        <section class="chat-main card">
+          <div id="chatEmptyState" class="empty-state">
+            Выберите чат слева или войдите в систему для отладки.
+          </div>
+
+          <div id="chatActiveView" class="chat-active hidden">
+            <div class="chat-header">
+              <div>
+                <div class="chat-title-row">
+                  <h2 id="activeChatTitle">Чат</h2>
+                  <span id="activeChatTypeBadge" class="badge"></span>
+                  <span id="activeChatChannelBadge" class="badge badge-warn hidden">Режим канала</span>
+                  <span id="activeChatArchivedBadge" class="badge badge-danger hidden">Архив</span>
+                </div>
+                <div id="activeChatBoundGroups" class="chat-meta"></div>
+              </div>
+              <div class="chat-controls">
+                <button id="toggleChatNotificationsBtn" class="btn btn-sm btn-secondary">🔔 Уведомления</button>
+                <button id="bindGroupsBtn" class="btn btn-sm btn-secondary hidden">Привязать группы</button>
+                <button id="openChatSettingsBtn" class="btn btn-sm btn-secondary hidden">⚙️ Права беседы</button>
+                <button id="openChatRolesBtn" class="btn btn-sm btn-secondary hidden">🏷️ Роли чата</button>
+                <button id="toggleArchiveBtn" class="btn btn-sm btn-secondary hidden">В архив</button>
+                <button id="toggleFilesBtn" class="btn btn-sm btn-secondary">📁 Файлы</button>
+              </div>
+            </div>
+
+            <div id="messagesList" class="messages-list"></div>
+
+            <!-- Панель ввода сообщения -->
+            <div class="composer">
+              <div class="composer-top">
+                <textarea id="messageTextInput" rows="2" placeholder="Введите сообщение..."></textarea>
+              </div>
+              <div class="composer-bottom">
+                <div class="composer-options">
+                  <label class="checkbox-inline">
+                    <input id="sendViaSignalRChk" type="checkbox" checked />
+                    Через SignalR
+                  </label>
+                  <label id="reqAckLabel" class="checkbox-inline hidden">
+                    <input id="reqAckChk" type="checkbox" />
+                    Требовать «Ознакомлен»
+                  </label>
+                  <button id="openPollModalBtn" class="btn btn-sm btn-secondary hidden">📊 Опрос</button>
+                </div>
+
+                <div class="composer-upload">
+                  <input id="uploadFileInput" type="file" class="hidden" />
+                  <button id="attachFileBtn" class="btn btn-sm btn-secondary" title="Прикрепить файл (Garage S3)">📎 Файл</button>
+                  <button id="recordVoiceBtn" class="btn btn-sm btn-secondary" title="Записать голосовое с микрофона">🎤 Голос</button>
+                  <span id="pendingFileLabel" class="pending-file hidden"></span>
+                  <button id="sendMessageBtn" class="btn btn-sm btn-primary">Отправить</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Правая колонка: вкладка всех файлов беседы -->
+        <aside id="filesDrawer" class="materials-sidebar card hidden">
+          <div class="sidebar-header">
+            <h3>Файлы беседы (Garage S3)</h3>
+            <button id="closeFilesBtn" class="btn btn-sm btn-secondary">✕</button>
+          </div>
+          <div class="materials-filters">
+            <input id="filesSearchInput" type="text" placeholder="Поиск по названию..." />
+            <select id="filesTypeSelect">
+              <option value="">Все вложения</option>
+              <option value="File">Только файлы</option>
+              <option value="Voice">Только голосовые</option>
+            </select>
+            <button id="refreshFilesBtn" class="btn btn-sm btn-primary">Найти</button>
+          </div>
+          <div id="filesList" class="materials-list"></div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- ВКЛАДКА 2: ПРОФИЛЬ, ГРУППЫ И УВЕДОМЛЕНИЯ -->
+    <main id="tab-profile" class="tab-panel">
+      <div class="grid-2">
+        <section class="card">
+          <h3>Текущий профиль</h3>
+          <div id="profileDetails" class="kv-list">Войдите в систему, чтобы увидеть профиль.</div>
+        </section>
+
+        <section id="notificationsCard" class="card">
+          <div class="section-header">
+            <h3>Уведомления (как в Telegram)</h3>
+            <button id="refreshNotificationsBtn" class="btn btn-sm btn-secondary">Обновить</button>
+          </div>
+          <p class="muted">Если галочка включена — уведомления приходят со всех чатов (включая новых пользователей), кроме заглушённых. Если выключена — только из чатов с режимом «Всегда получать».</p>
+          <div class="form-stack">
+            <label class="checkbox-inline">
+              <input id="defaultNotifyChk" type="checkbox" checked />
+              Получать уведомления по умолчанию (и от новых чатов/пользователей)
+            </label>
+            <div id="chatNotificationsTableWrap" class="table-wrap"></div>
+          </div>
+        </section>
+
+        <section class="card full-span">
+          <div class="section-header">
+            <h3>Справочник учебных групп, старост и кураторов</h3>
+            <button id="refreshDirectoryGroupsBtn" class="btn btn-sm btn-secondary">Обновить</button>
+          </div>
+          <p class="muted">Преподаватели и администраторы сразу видят ФИО старосты и куратора каждой группы и могут написать им в личку в один клик.</p>
+          <div id="directoryGroupsTableWrap" class="table-wrap"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- ВКЛАДКА 3: АДМИН-ПАНЕЛЬ -->
+    <main id="tab-admin" class="tab-panel">
+      <div class="grid-2">
+        <!-- Пакетный импорт CSV -->
+        <section class="card">
+          <h3>Пакетный импорт из CSV</h3>
+          <p class="muted">Формат: <code>FullName;Email;GroupName;Role</code> (роли: <code>Student</code>, <code>Employee</code>, <code>Admin</code>; алиас <code>Leader</code> сразу назначает старосту группы).</p>
+          <div class="form-stack">
+            <label>CSV-файл (<code>sample-users.csv</code> в папке <code>frontend/</code>)
+              <input id="csvFileInput" type="file" accept=".csv,text/csv" />
+            </label>
+            <label>Факультет по умолчанию
+              <input id="csvDefaultFaculty" type="text" value="Факультет информационных технологий" />
+            </label>
+            <label class="checkbox-inline">
+              <input id="csvSendEmailsChk" type="checkbox" />
+              Отправлять письма по SMTP
+            </label>
+            <div class="row-actions">
+              <button id="importCsvBtn" class="btn btn-primary">Импортировать CSV</button>
+              <button id="importDemoCsvBtn" class="btn btn-secondary">Импортировать демо-набор (5 чел.)</button>
+            </div>
+          </div>
+          <div id="importResultBox" class="import-result hidden"></div>
+        </section>
+
+        <!-- Ручная регистрация -->
+        <section class="card">
+          <h3>Ручная регистрация пользователя</h3>
+          <div class="form-stack">
+            <label>ФИО <input id="cuFullName" type="text" placeholder="Иванов Иван Иванович" /></label>
+            <label>Email <input id="cuEmail" type="email" placeholder="user@uni.ru" /></label>
+            <div class="row-2">
+              <label>Глобальная роль
+                <select id="cuRole">
+                  <option value="Student">Student (Студент)</option>
+                  <option value="Employee">Employee (Преподаватель / Сотрудник)</option>
+                  <option value="Admin">Admin (Деканат)</option>
+                </select>
+              </label>
+              <label>Название группы (для студента)
+                <input id="cuGroupName" type="text" placeholder="413.2" />
+              </label>
+            </div>
+            <label class="checkbox-inline">
+              <input id="cuSendEmailChk" type="checkbox" />
+              Отправить временный пароль на Email
+            </label>
+            <button id="createUserBtn" class="btn btn-primary">Создать пользователя</button>
+          </div>
+          <div id="createUserResult" class="import-result hidden"></div>
+        </section>
+
+        <!-- Учебные группы + назначение Старосты и Куратора -->
+        <section class="card full-span">
+          <div class="section-header">
+            <h3>Учебные группы: назначение старост и кураторов</h3>
+            <button id="refreshGroupsBtn" class="btn btn-sm btn-secondary">Обновить</button>
+          </div>
+          <div class="inline-form">
+            <input id="cgName" type="text" placeholder="Группа (напр. 413.1)" />
+            <input id="cgCourse" type="number" min="1" max="6" value="4" title="Курс" style="max-width:80px" />
+            <input id="cgFaculty" type="text" value="ФИТ" placeholder="Факультет" />
+            <button id="createGroupBtn" class="btn btn-sm btn-primary">+ Создать группу</button>
+          </div>
+          <div id="groupsTableWrap" class="table-wrap"></div>
+        </section>
+
+        <!-- Все пользователи -->
+        <section class="card full-span">
+          <div class="section-header">
+            <h3>Пользователи системы</h3>
+            <button id="refreshUsersBtn" class="btn btn-sm btn-secondary">Обновить</button>
+          </div>
+          <div class="inline-form">
+            <input id="filterUsersSearch" type="text" placeholder="Поиск по ФИО или Email..." />
+            <select id="filterUsersRole">
+              <option value="">Все роли</option>
+              <option value="Admin">Admin</option>
+              <option value="Employee">Employee</option>
+              <option value="Student">Student</option>
+            </select>
+            <button id="applyUsersFilterBtn" class="btn btn-sm btn-secondary">Найти</button>
+          </div>
+          <div id="usersTableWrap" class="table-wrap"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- ВКЛАДКА 4: ЛОГИ API / SIGNALR -->
+    <main id="tab-logs" class="tab-panel">
+      <section class="card">
+        <div class="section-header">
+          <h3>Журнал HTTP-запросов и событий SignalR</h3>
+          <button id="clearLogsBtn" class="btn btn-sm btn-secondary">Очистить</button>
+        </div>
+        <div id="logList" class="log-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО ВХОДА -->
+  <div id="loginModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Авторизация</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="loginModal">✕</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="subtab active" data-auth-mode="password">Email / Пароль</button>
+        <button class="subtab" data-auth-mode="eios">Вход через ЭИОС КГУ</button>
+      </div>
+
+      <div id="authModePassword" class="form-stack">
+        <label>Email <input id="loginEmail" type="email" value="admin@faculty.local" /></label>
+        <label>Пароль <input id="loginPassword" type="password" value="nJMcmfH4VwDEo2SK!a1" /></label>
+        <div class="row-actions">
+          <button id="fillDefaultAdminBtn" class="btn btn-sm btn-secondary">Заполнить дефолт-админа</button>
+          <button id="loginSubmitBtn" class="btn btn-primary">Войти</button>
+        </div>
+      </div>
+
+      <div id="authModeEios" class="form-stack hidden">
+        <p class="muted" style="margin:0">Проверка логина и пароля через <code>my.kursksu.ru</code>. При первом входе присваивается роль <code>Student</code>.</p>
+        <label>Логин ЭИОС КГУ <input id="eiosUsername" type="text" placeholder="Логин личного кабинета" /></label>
+        <label>Пароль ЭИОС КГУ <input id="eiosPassword" type="password" placeholder="Пароль" /></label>
+        <label>Учебная группа (необязательно)
+          <input id="eiosGroupName" type="text" placeholder="Например: 413.2" />
+        </label>
+        <label class="checkbox-inline">
+          <input id="eiosDemoChk" type="checkbox" />
+          Демо-режим (без запроса к my.kursksu.ru)
+        </label>
+        <label id="eiosDemoFullNameWrap" class="hidden">ФИО (для демо-режима)
+          <input id="eiosFullName" type="text" value="Новиков Олег Дмитриевич" />
+        </label>
+        <button id="eiosLoginSubmitBtn" class="btn btn-primary">Войти через ЭИОС КГУ</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: СВОЯ БЕСЕДА (для всех, включая студентов) -->
+  <div id="customChatModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Новая беседа (подгруппа / проект)</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="customChatModal">✕</button>
+      </div>
+      <div class="form-stack">
+        <label>Название беседы <input id="customChatTitleInput" type="text" placeholder="Команда по курсовому проекту" /></label>
+        <label>Участники (удерживайте Ctrl для выбора нескольких)
+          <select id="customChatUsersSelect" multiple size="6"></select>
+        </label>
+        <button id="createCustomChatSubmitBtn" class="btn btn-primary">Создать беседу</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: ПРЕДМЕТНЫЙ ЧАТ -->
+  <div id="subjectChatModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Новый предметный чат</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="subjectChatModal">✕</button>
+      </div>
+      <div class="form-stack">
+        <label>Название дисциплины <input id="subjTitleInput" type="text" placeholder="Базы данных" /></label>
+        <label>Привязать группы (Ctrl для нескольких)
+          <select id="subjGroupsSelect" multiple size="5"></select>
+        </label>
+        <label class="checkbox-inline"><input id="subjSendMsgChk" type="checkbox" checked /> Участники могут писать</label>
+        <label class="checkbox-inline"><input id="subjSendMediaChk" type="checkbox" checked /> Участники могут отправлять файлы/аудио</label>
+        <label class="checkbox-inline"><input id="subjPinChk" type="checkbox" /> Участники могут закреплять</label>
+        <label class="checkbox-inline"><input id="subjPollsChk" type="checkbox" /> Участники могут создавать опросы</label>
+        <button id="createSubjectSubmitBtn" class="btn btn-primary">Создать чат</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: ЛИЧНЫЙ ЧАТ -->
+  <div id="directChatModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Начать личный чат</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="directChatModal">✕</button>
+      </div>
+      <div class="form-stack">
+        <label>ID пользователя (GUID) или выберите ниже
+          <input id="directTargetIdInput" type="text" placeholder="GUID собеседника" />
+        </label>
+        <div id="directUserSuggestions" class="suggestions-list"></div>
+        <button id="createDirectSubmitBtn" class="btn btn-primary">Открыть чат</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: ПРИВЯЗКА ГРУПП -->
+  <div id="bindGroupsModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Привязать группы к чату</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="bindGroupsModal">✕</button>
+      </div>
+      <div class="form-stack">
+        <label>Названия групп через запятую (например: 413.1, 413.2)
+          <input id="bindGroupNamesInput" type="text" placeholder="413.1, 413.2" />
+        </label>
+        <button id="bindGroupsSubmitBtn" class="btn btn-primary">Привязать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: ГИБКИЕ НАСТРОЙКИ ПРАВ БЕСЕДЫ -->
+  <div id="chatSettingsModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Настройки прав обычных участников</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="chatSettingsModal">✕</button>
+      </div>
+      <div class="form-stack">
+        <label class="checkbox-inline"><input id="setSendMsgChk" type="checkbox" /> Разрешить писать сообщения (выкл = режим канала)</label>
+        <label class="checkbox-inline"><input id="setSendMediaChk" type="checkbox" /> Разрешить прикреплять файлы и голосовые</label>
+        <label class="checkbox-inline"><input id="setPinMsgChk" type="checkbox" /> Разрешить закреплять сообщения</label>
+        <label class="checkbox-inline"><input id="setCreatePollsChk" type="checkbox" /> Разрешить создавать опросы</label>
+        <button id="saveChatSettingsBtn" class="btn btn-primary">Сохранить настройки</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: КОНСТРУКТОР РОЛЕЙ ЧАТА -->
+  <div id="chatRolesModal" class="modal hidden">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <h3>Конструктор ролей чата (как в Discord / Telegram)</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="chatRolesModal">✕</button>
+      </div>
+      <div class="grid-2">
+        <div>
+          <h4>Роли чата и выдача участникам</h4>
+          <div id="chatRolesList" class="form-stack"></div>
+        </div>
+        <div>
+          <h4>Создать свою роль</h4>
+          <div class="form-stack">
+            <div class="row-2">
+              <label>Название роли <input id="newRoleName" type="text" placeholder="Модератор" /></label>
+              <label>Цвет бейджа <input id="newRoleColor" type="color" value="#7c3aed" style="height:34px" /></label>
+            </div>
+            <label class="checkbox-inline"><input id="nrSendMsg" type="checkbox" checked /> Писать (даже в режиме канала)</label>
+            <label class="checkbox-inline"><input id="nrSendMedia" type="checkbox" checked /> Отправлять файлы/аудио</label>
+            <label class="checkbox-inline"><input id="nrPin" type="checkbox" /> Закреплять сообщения</label>
+            <label class="checkbox-inline"><input id="nrDelete" type="checkbox" /> Удалять чужие сообщения (спам)</label>
+            <label class="checkbox-inline"><input id="nrPolls" type="checkbox" /> Создавать опросы</label>
+            <label class="checkbox-inline"><input id="nrAck" type="checkbox" /> Важные объявления («Ознакомлен»)</label>
+            <label class="checkbox-inline"><input id="nrManageRoles" type="checkbox" /> Выдавать и настраивать роли</label>
+            <label class="checkbox-inline"><input id="nrManageSettings" type="checkbox" /> Менять настройки беседы</label>
+            <button id="createChatRoleSubmitBtn" class="btn btn-primary">Создать роль</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: СОЗДАНИЕ ОПРОСА -->
+  <div id="pollModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Создать опрос</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="pollModal">✕</button>
+      </div>
+      <div class="form-stack">
+        <label>Вопрос <input id="pollQuestionInput" type="text" placeholder="Запись на защиту лабораторной работы №1" /></label>
+        <div id="pollOptionsContainer" class="form-stack"></div>
+        <button id="addPollOptionBtn" class="btn btn-sm btn-secondary">+ Добавить вариант</button>
+        <label class="checkbox-inline"><input id="pollMultiChk" type="checkbox" /> Разрешить несколько вариантов</label>
+        <label id="pollAckWrap" class="checkbox-inline"><input id="pollAckChk" type="checkbox" /> Требовать «Ознакомлен»</label>
+        <button id="createPollSubmitBtn" class="btn btn-primary">Опубликовать опрос</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: СТАТУС «ОЗНАКОМЛЕН» -->
+  <div id="ackStatusModal" class="modal hidden">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <h3>Статус ознакомления с объявлением</h3>
+        <button class="btn btn-sm btn-secondary" data-close-modal="ackStatusModal">✕</button>
+      </div>
+      <div id="ackStatusBody" class="grid-2"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
